@@ -116,9 +116,9 @@ Confirm:
 
 Production hostname after first deploy: **https://omnia-global-monitor.vercel.app**
 
-### 3. Provision Upstash Redis (Marketplace)
+### 3. Provision Upstash Redis
 
-Preferred (auto-wires env vars into the linked project):
+**A — Marketplace (preferred for permanent prod):**
 
 ```bash
 npx vercel install upstash
@@ -126,7 +126,16 @@ npx vercel install upstash
 npx vercel integration add upstash
 ```
 
-Manual alternative:
+**B — Agent start-redis (used for this deploy; claim within 3 days):**
+
+```bash
+curl -X POST -H "Idempotency-Key: $(uuidgen | tr '[:upper:]' '[:lower:]')" \
+  https://upstash.com/start-redis
+```
+
+Parse Endpoint + Token from the markdown response. Claim at the console URL in the response. Do not commit tokens to git.
+
+**C — Manual console:**
 
 1. Create a Redis DB at [console.upstash.com](https://console.upstash.com).
 2. Copy REST URL + token.
