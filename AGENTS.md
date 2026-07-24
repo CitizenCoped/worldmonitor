@@ -235,6 +235,19 @@ Heavy checks (`test:data`, typechecks, edge-bundle) must run **sequentially** in
 - New data sources MUST have bootstrap hydration wired in `api/bootstrap.js`
 - Redis seed scripts MUST write `seed-meta:<key>` for health monitoring
 
+## Cursor Cloud specific instructions
+
+Durable, non-obvious notes for cloud agents (env dependencies are already refreshed by the startup update script — do not re-run installs here).
+
+- **Node 24 is required** (`.nvmrc` = `24`; Vercel project runs `24.x`). The VM's `/exec-daemon/node` (v22) shadows nvm on `PATH`, so a one-time line in `~/.bashrc` prepends the nvm Node 24 bin. New interactive shells get Node 24 automatically. If a shell reports v22, run `export PATH="$HOME/.nvm/versions/node/v24.18.0/bin:$PATH"`. `node_modules` is built with Node 24 by the update script — running tooling under v22 risks native-module ABI mismatches.
+- **Run/lint/test/build commands are already documented** in the `## How to Run` and `## Testing` sections above (`npm run dev`, `npm run typecheck` / `typecheck:api`, `npm run lint`, `npm run test:data`, `npm run build`). The dev server listens on `http://localhost:3000`.
+- **No env vars are needed to boot dev.** The app runs credential-free; missing API keys / Upstash Redis degrade gracefully per feature (`server/_shared/redis.ts` gates on `UPSTASH_REDIS_REST_URL`/`_TOKEN`).
+- **Dev-mode API caveat:** the Vite dev server serves the sebuf RPC gateway in-process, but legacy `api/*.js` edge functions (e.g. `/api/health`) are returned as transformed JS modules rather than executed. Test those on a real Vercel deploy, not the dev server.
+- **`test:data` needs a prior build** for 2 specs in `tests/dashboard-critical-css.test.mjs` (they assert on `dist/dashboard.html`). Run `npm run build` first, or treat those two as build-dependent.
+- **Some upstream feeds fail from cloud IPs** (various RSS hosts, ACLED without auth, OpenSky). These log warnings and fall back; the core dashboard still works.
+- **Browser/manual testing:** headless Chrome here has **no GPU**. The 2D MapLibre map renders under software rasterization, but heavier WebGL/3D transitions (deck.gl / globe) can drop to a black screen with a spinning loading cube — a capture limitation, not an app bug. Launch Chrome with `--disable-gpu --disable-software-rasterizer --no-sandbox --disable-dev-shm-usage` and prefer screenshots of the 2D map for evidence.
+- **Vercel deploy:** the target project is `omnia-global-monitor` (team `sethrocks-projects`). Deploying the full SPA needs a Vercel token/login (none is present in the VM) or the GitHub→Vercel Git integration; see `buildguide.md` for the operator runbook.
+
 ## External References
 
 - [Architecture (system reference)](ARCHITECTURE.md)
