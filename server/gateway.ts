@@ -12,6 +12,7 @@
 import { createRouter, type RouteDescriptor } from './router';
 import { getCorsHeaders, isDisallowedOrigin, isAllowedOrigin } from './cors';
 import { isPublicSharedRpcRequest } from '../src/shared/public-rpc-cache';
+import { PRO_FRESH_CACHE_RPC_PATHS } from '../src/shared/pro-fresh-rpc';
 // @ts-expect-error — JS module, no declaration file
 import { USER_API_KEY_GATEWAY_VALIDATION_ERROR, validateApiKey } from '../api/_api-key.js';
 // @ts-expect-error — JS module, no declaration file
@@ -28,7 +29,14 @@ import {
 import { drainResponseHeaders, drainSuccessStatusOverride } from './_shared/response-headers';
 import { projectJsonResponse } from './_shared/response-projection';
 import { getRpcNoStoreReasonFromJson } from './_shared/cache-contract';
-import { checkEntitlementDetailed, getRequiredTier, getEntitlements, type CachedEntitlements } from './_shared/entitlement-check';
+import {
+  checkEntitlementDetailed,
+  getBillingVerificationDenial,
+  getRequiredTier,
+  getEntitlements,
+  isEntitlementBackendConfigured,
+  type CachedEntitlements,
+} from './_shared/entitlement-check';
 import { resolveClerkSession } from './_shared/auth-session';
 import {
   INTERNAL_MCP_SIG_HEADER,
@@ -55,7 +63,6 @@ import {
   reserveDailyMeter,
   rateLimitHeaders,
   ENTERPRISE_API_RATE_LIMIT,
-  CEILING_MULTIPLIER,
 } from './_shared/api-key-rate-limit';
 import {
   DIRECT_LLM_DAILY_QUOTA_LIMIT,
@@ -123,7 +130,7 @@ async function claimInternalMcpReplayNonce(userId: string, nonce: string): Promi
 // NOTE: This map is shared across all domain bundles (~3KB). Kept centralised for
 // single-source-of-truth maintainability; the size is negligible vs handler code.
 
-type CacheTier = 'fast' | 'medium' | 'slow' | 'slow-browser' | 'static' | 'daily' | 'no-store' | 'live';
+type CacheTier = 'fast' | 'medium' | 'slow' | 'slow-browser' | 'live-browser' | 'static' | 'daily' | 'no-store' | 'live';
 
 // Three-tier caching: browser (max-age) → CF edge (s-maxage) → Vercel CDN (CDN-Cache-Control).
 // CF ignores Vary: Origin so it may pin a single ACAO value, but this is acceptable
@@ -138,6 +145,7 @@ const TIER_HEADERS: Record<CacheTier, string> = {
   medium: 'public, max-age=120, s-maxage=600, stale-while-revalidate=120, stale-if-error=900',
   slow: 'public, max-age=300, s-maxage=1800, stale-while-revalidate=300, stale-if-error=3600',
   'slow-browser': 'max-age=300, stale-while-revalidate=60, stale-if-error=1800',
+  'live-browser': 'private, max-age=30, stale-while-revalidate=60, stale-if-error=300',
   static: 'public, max-age=600, s-maxage=3600, stale-while-revalidate=600, stale-if-error=14400',
   daily: 'public, max-age=3600, s-maxage=14400, stale-while-revalidate=7200, stale-if-error=172800',
   'no-store': 'no-store',
@@ -152,6 +160,7 @@ const TIER_CDN_CACHE: Record<CacheTier, string | null> = {
   medium: 'public, s-maxage=1200, stale-while-revalidate=600, stale-if-error=1800',
   slow: 'public, s-maxage=3600, stale-while-revalidate=900, stale-if-error=7200',
   'slow-browser': 'public, s-maxage=900, stale-while-revalidate=60, stale-if-error=1800',
+  'live-browser': null,
   static: 'public, s-maxage=14400, stale-while-revalidate=3600, stale-if-error=28800',
   daily: 'public, s-maxage=86400, stale-while-revalidate=14400, stale-if-error=172800',
   'no-store': null,
@@ -724,6 +733,23 @@ export function createDomainGateway(
     // volume signal Phase-2 pricing reuses isn't double-counted. Overrides only
     // a successful terminal reason (status < 400); a real 4xx/5xx outcome wins.
     let pendingShadowReason: RequestReason | null = null;
+    // Shared emit+return for the three billing-verification denial sites below
+    // (internal-MCP re-check, wm_ key, legacy bearer).
+    function denyForBillingVerification(
+      ent: CachedEntitlements | null | undefined,
+      cors: Record<string, string>,
+      capabilityCovered = false,
+    ): Response | null {
+      if (capabilityCovered) return null;
+      const billingDenial = getBillingVerificationDenial(ent, cors);
+      if (!billingDenial) return null;
+      emitRequest(
+        billingDenial.status,
+        billingDenial.status === 503 ? 'billing_verification_503' : 'tier_403',
+        null,
+      );
+      return billingDenial;
+    }
     function emitRequest(status: number, reason: RequestReason, cacheTier: UsageCacheTier | null, resBytes = 0): void {
       if (!ctx?.waitUntil) return;
       const effectiveReason: RequestReason =
@@ -1015,6 +1041,16 @@ export function createDomainGateway(
       // re-check via the fallback path. Mirror the per-handler runProPreChecks
       // and authorize-pro entitlement guards.
       const ent = await getEntitlements(verified.userId);
+      const mcpCovered = !!ent &&
+        ent.features.tier >= 1 &&
+        (ent.features as { mcpAccess?: boolean }).mcpAccess === true &&
+        ent.validUntil >= Date.now();
+      const billingDenial = denyForBillingVerification(
+        ent,
+        corsHeaders,
+        mcpCovered,
+      );
+      if (billingDenial) return billingDenial;
       if (
         !ent ||
         ent.features.tier < 1 ||
@@ -1082,13 +1118,20 @@ export function createDomainGateway(
     const requiresDirectLlmQuota = !internalMcpVerified && await shouldReserveGatewayDirectLlmQuota(request, pathname);
     const isTierGated = !internalMcpVerified && !isPublicNoAuthRpc && !seedRefreshVerified && !relayWarmPingVerified && getRequiredTier(pathname) !== null;
     const needsLegacyProBearerGate = !internalMcpVerified && !isPublicNoAuthRpc && PREMIUM_RPC_PATHS.has(pathname) && !isTierGated;
+    const isProFreshCacheRpc = PRO_FRESH_CACHE_RPC_PATHS.has(pathname);
+    const needsProFreshnessResolution =
+      !internalMcpVerified &&
+      !isPublicNoAuthRpc &&
+      isProFreshCacheRpc &&
+      request.headers.get('Authorization')?.startsWith('Bearer ') === true;
     let endpointRateLimitPrincipalUserId: string | undefined;
 
     // Session resolution — extract userId from bearer token (Clerk JWT) if present.
-    // Only runs for tier-gated or direct-LLM endpoints to avoid JWKS lookup on every request.
+    // Runs only for tier gates, direct-LLM quota, or the explicit Pro-fresh
+    // market allowlist to avoid JWKS lookup on every request.
     let sessionUserId: string | null = null;
     let sessionRole: 'free' | 'pro' | null = null;
-    if (isTierGated || requiresDirectLlmQuota) {
+    if (isTierGated || requiresDirectLlmQuota || needsProFreshnessResolution) {
       const session = await resolveClerkSession(request);
       sessionUserId = session?.userId ?? null;
       sessionRole = session?.role ?? null;
@@ -1127,6 +1170,30 @@ export function createDomainGateway(
       request.headers.get('X-Api-Key') ??
       '';
     if (keyCheck.required && !keyCheck.valid && wmKey.startsWith('wm_')) {
+      // Unknown wm_ credentials require a Convex-backed hash lookup before we
+      // know the account principal. Bound that unattributed work by IP first:
+      // otherwise an attacker can rotate syntactically-valid keys and evade the
+      // per-hash negative cache while every request reaches Convex. The 600/min
+      // ceiling matches the repo-wide global IP budget and deliberately fails
+      // closed when Redis is unavailable because this guard protects the auth
+      // backend itself.
+      const validationGuardResponse = await checkFailClosedScopedIpRateLimit(
+        request,
+        'user-api-key:pre-auth-validation',
+        600,
+        '60 s',
+        corsHeaders,
+      );
+      if (validationGuardResponse) {
+        const reason =
+          validationGuardResponse.status === 503 &&
+          validationGuardResponse.headers.get('X-RateLimit-Mode') === 'degraded'
+            ? 'rate_limit_degraded'
+            : 'rate_limit_429';
+        emitRequest(validationGuardResponse.status, reason, null);
+        return validationGuardResponse;
+      }
+
       const { validateUserApiKey } = await import('./_shared/user-api-key');
       const userKeyResult = await validateUserApiKey(wmKey);
       if (userKeyResult) {
@@ -1153,8 +1220,13 @@ export function createDomainGateway(
     // Clerk session is itself proof of authentication (validated at line 410).
     // validateApiKey is strict-no-trust-of-headers per #3541 and would 401 every
     // Clerk-authenticated user who hasn't also minted a wms_ session token.
-    // Override: tier-gated routes with a resolved sessionUserId pass this layer.
-    if ((isTierGated || requiresDirectLlmQuota) && sessionUserId && keyCheck.required && !keyCheck.valid) {
+    // Override: routes that deliberately resolved a sessionUserId pass this layer.
+    if (
+      (isTierGated || requiresDirectLlmQuota || needsProFreshnessResolution) &&
+      sessionUserId &&
+      keyCheck.required &&
+      !keyCheck.valid
+    ) {
       keyCheck = { valid: true, required: false };
     }
 
@@ -1195,16 +1267,51 @@ export function createDomainGateway(
     if (isUserApiKey && sessionUserId) {
       userKeyEntitlement = await getEntitlements(sessionUserId);
       recordUsageEntitlement(userKeyEntitlement);
-      // Fail-OPEN on an unresolved entitlement (null ⇒ transient Convex/cache
-      // failure, indistinguishable from "no row"): mirrors the #3199 block below
-      // and avoids 403-ing an ACTIVE subscriber fleet-wide during a backend
-      // blip. Reject only on an AFFIRMATIVELY inactive/expired entitlement — the
-      // systematic churn case (#4611), always resolvable under normal operation
-      // (the warm 15-min entitlement cache closes the leak; an outage degrades
-      // to prior behavior rather than denying paying customers).
-      if (
-        userKeyEntitlement &&
-        (!userKeyEntitlement.features.apiAccess || userKeyEntitlement.validUntil < Date.now())
+      const apiAccessCovered = !!userKeyEntitlement &&
+        userKeyEntitlement.features.apiAccess &&
+        (userKeyEntitlement.validUntil ?? 0) >= Date.now();
+      const billingDenial = denyForBillingVerification(
+        userKeyEntitlement,
+        corsHeaders,
+        apiAccessCovered,
+      );
+      if (billingDenial) return billingDenial;
+      // A validated wm_ key proves key ownership, not current paid access.
+      // Transient lookup failures now arrive as a verificationUnavailable
+      // marker and were already answered with the retryable 503 by
+      // denyForBillingVerification above; a null here means the backend is
+      // unconfigured or gave a confirmed/malformed answer, and allowing it
+      // would turn that state into paid API access. Fail closed with a 503
+      // — EXCEPT when the entitlement backend itself is unconfigured: that is
+      // a deploy defect, not customer billing state, and 503ing every wm_ key
+      // fleet-wide would convert a config regression into a total API outage.
+      // Misconfig serves fail-open (pre-#4770 behavior) and logs loudly.
+      if (!userKeyEntitlement) {
+        if (isEntitlementBackendConfigured()) {
+          emitRequest(503, 'billing_verification_503', null);
+          return new Response(
+            JSON.stringify({
+              error: 'Unable to verify API access',
+              code: 'entitlement_verification_unavailable',
+            }),
+            {
+              status: 503,
+              headers: {
+                ...corsHeaders,
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-store',
+                'Retry-After': '5',
+                'X-Billing-Verification': 'entitlement_verification_unavailable',
+              },
+            },
+          );
+        }
+        console.error(
+          '[gateway] entitlement backend unconfigured (CONVEX_SITE_URL / shared secret missing) — serving wm_-key request fail-open',
+        );
+      } else if (
+        !userKeyEntitlement.features.apiAccess ||
+        (userKeyEntitlement.validUntil ?? 0) < Date.now()
       ) {
         emitRequest(403, 'tier_403', null);
         return createGatewayAuthErrorResponse(
@@ -1213,6 +1320,26 @@ export function createDomainGateway(
           corsHeaders,
         );
       }
+    }
+
+    // Pro freshness is an optional paid benefit, not an access gate. Resolve
+    // only identities that were already verified above (Clerk bearer or a
+    // user-owned API key), then fail closed to the ordinary cache policy when
+    // entitlement state is absent, expired, or temporarily unavailable.
+    //
+    // Do not accept the Clerk role alone here: this contract is specifically
+    // for active plans, while role='pro' can also represent legacy/test grants.
+    let hasProFreshCacheAccess = internalMcpVerified && isProFreshCacheRpc;
+    if (!hasProFreshCacheAccess && isProFreshCacheRpc && sessionUserId) {
+      const ent =
+        userKeyEntitlement !== undefined
+          ? userKeyEntitlement
+          : await getEntitlements(sessionUserId);
+      recordUsageEntitlement(ent);
+      hasProFreshCacheAccess =
+        !!ent &&
+        ent.features.tier >= 1 &&
+        ent.validUntil >= Date.now();
     }
 
     if (keyCheck.required && !keyCheck.valid) {
@@ -1253,6 +1380,15 @@ export function createDomainGateway(
           if (!allowed && session.userId) {
             const ent = await getEntitlements(session.userId);
             recordUsageEntitlement(ent);
+            const proCovered = !!ent &&
+              ent.features.tier >= 1 &&
+              ent.validUntil >= Date.now();
+            const billingDenial = denyForBillingVerification(
+              ent,
+              corsHeaders,
+              proCovered,
+            );
+            if (billingDenial) return billingDenial;
             allowed = !!ent && ent.features.tier >= 1 && ent.validUntil >= Date.now();
           }
           if (!allowed) {
@@ -1291,6 +1427,7 @@ export function createDomainGateway(
         const entReason: RequestReason =
           entitlementResponse.status === 401 ? 'auth_401'
           : entitlementResponse.status === 403 ? 'tier_403'
+          : entitlementResponse.status === 503 ? 'billing_verification_503'
           : 'ok';
         emitRequest(entitlementResponse.status, entReason, null);
         return entitlementResponse.status === 401 || entitlementResponse.status === 403
@@ -1473,8 +1610,8 @@ export function createDomainGateway(
       // ── Per-account API rate limit (#3199) ──────────────────────────────
       // Eligible authenticated keys — a valid user key (which carries NO
       // keyCheck.kind, so `isUserApiKey` is the discriminator) or an enterprise
-      // env key — are governed by a per-account burst + daily meter + 10×
-      // safety ceiling instead of the global per-IP cap. In ENFORCE they bypass
+      // env key — are governed by a per-account burst + daily meter (enforced
+      // at the sold allowance, #4635) instead of the global per-IP cap. In ENFORCE they bypass
       // the per-IP fallback below; in SHADOW they only record telemetry and
       // still fall through to per-IP, so protection never drops below today.
       // Limits are NOT in scope here (checkEntitlement discards `features`), so
@@ -1486,9 +1623,11 @@ export function createDomainGateway(
         let perMinute = 0;
         let allowance = -1;
         let identity = '';
+        let planKey = ''; // #4635 — hoisted for the informative 429 (ent is block-scoped below)
         if (isEnterpriseAuth) {
           perMinute = ENTERPRISE_API_RATE_LIMIT; // hardcoded — no entitlement row
           allowance = -1; // unlimited daily / no ceiling
+          planKey = 'enterprise'; // top tier — named in the 429, but no upgrade_url
           usage.tier = 3; // enterprise tier — no entitlement row to read it from
           // (plan_key defaults to 'enterprise' in buildUsageIdentity)
           // Enterprise burst is keyed PER KEY (not per account) by design:
@@ -1520,6 +1659,7 @@ export function createDomainGateway(
               typeof ent.features.apiDailyAllowance === 'number'
                 ? ent.features.apiDailyAllowance
                 : -1;
+            planKey = ent.planKey;
             identity = sessionUserId;
           }
           // else: downgraded / null entitlement ⇒ not eligible (perMinute = 0),
@@ -1527,13 +1667,23 @@ export function createDomainGateway(
         }
 
         if (perMinute > 0 && identity) {
+          // #4635 — informative 429 upgrade link; omitted for enterprise/top tier.
+          const upgradeUrl =
+            planKey && planKey !== 'enterprise' ? 'https://worldmonitor.app/' : undefined;
           // 1. Per-minute burst (hard limit).
           const burst = await checkBurst(perMinute, identity);
           if (!burst.ok) {
             if (enforce) {
               const retryAfterSec = Math.max(1, Math.ceil((burst.reset - Date.now()) / 1000));
               emitRequest(429, 'rl_min_429', null);
-              return new Response(JSON.stringify({ error: 'Too many requests' }), {
+              return new Response(JSON.stringify({
+                error: 'Too many requests',
+                plan: planKey || undefined,
+                limit: burst.limit,
+                limit_type: 'per_minute',
+                reset: new Date(burst.reset).toISOString(),
+                upgrade_url: upgradeUrl,
+              }), {
                 status: 429,
                 headers: {
                   'Content-Type': 'application/json',
@@ -1545,23 +1695,31 @@ export function createDomainGateway(
             }
             pendingShadowReason = 'rl_min_shadow';
           } else if (allowance >= 0) {
-            // 2. Daily meter + 10× ceiling (skipped for unlimited allowance).
+            // 2. Daily meter — hard-rejects at the sold allowance (#4635).
+            //    Skipped for unlimited (-1); reserveDailyMeter fail-opens on <=0.
             const meter = await reserveDailyMeter({
               userId: identity,
               allowance,
               pipeline: (cmds) => runRedisPipeline(cmds),
             });
-            if (meter.overCeiling) {
+            if (meter.overLimit) {
               if (enforce) {
                 await meter.rollback();
                 emitRequest(429, 'rl_ceiling_429', null);
-                return new Response(JSON.stringify({ error: 'Daily request ceiling exceeded' }), {
+                return new Response(JSON.stringify({
+                  error: 'Daily request limit reached',
+                  plan: planKey || undefined,
+                  limit: allowance,
+                  limit_type: 'daily',
+                  reset: new Date(Date.now() + meter.retryAfterSec * 1000).toISOString(),
+                  upgrade_url: upgradeUrl,
+                }), {
                   status: 429,
                   headers: {
                     'Content-Type': 'application/json',
                     'Cache-Control': 'no-store',
                     ...rateLimitHeaders({
-                      limit: allowance * CEILING_MULTIPLIER,
+                      limit: allowance,
                       remaining: 0,
                       resetMs: Date.now() + meter.retryAfterSec * 1000,
                       retryAfterSec: meter.retryAfterSec,
@@ -1711,7 +1869,8 @@ export function createDomainGateway(
         const envOverride = process.env[`CACHE_TIER_OVERRIDE_${rpcName.replace(/-/g, '_').toUpperCase()}`] as CacheTier | undefined;
         const isPremium = PREMIUM_RPC_PATHS.has(pathname) || getRequiredTier(pathname) !== null;
         const hasCredentialedNonPublicGet = !isPublicNoAuthRpc && hasCredentialBearingHeader(request);
-        const tier = isPremium || hasCredentialedNonPublicGet ? 'slow-browser' as CacheTier
+        const tier = hasProFreshCacheAccess ? 'live-browser' as CacheTier
+          : isPremium || hasCredentialedNonPublicGet ? 'slow-browser' as CacheTier
           : (envOverride && envOverride in TIER_HEADERS ? envOverride : null) ?? RPC_CACHE_TIER[pathname] ?? 'medium';
         resolvedCacheTier = tier;
         mergedHeaders.set('Cache-Control', TIER_HEADERS[tier]);
@@ -1721,7 +1880,9 @@ export function createDomainGateway(
         // 200 from a trusted-origin browser request could be served to a no-origin scraper,
         // bypassing auth entirely.
         const reqOrigin = request.headers.get('origin') || '';
-        const cdnCache = !isPremium && !hasCredentialedNonPublicGet && isAllowedOrigin(reqOrigin) ? TIER_CDN_CACHE[tier] : null;
+        const cdnCache = !hasProFreshCacheAccess && !isPremium && !hasCredentialedNonPublicGet && isAllowedOrigin(reqOrigin)
+          ? TIER_CDN_CACHE[tier]
+          : null;
         mergedHeaders.delete('CDN-Cache-Control');
         mergedHeaders.delete('Vercel-CDN-Cache-Control');
         if (cdnCache) mergedHeaders.set('CDN-Cache-Control', cdnCache);

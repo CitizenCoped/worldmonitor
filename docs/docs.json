@@ -73,6 +73,7 @@
                   "usage-auth",
                   "usage-rate-limits",
                   "usage-errors",
+                  "sandbox",
                   "pricing",
                   "accounts",
                   "api-keys",
@@ -230,6 +231,7 @@
                   "cors",
                   "health-endpoints",
                   "relay-parameters",
+                  "decision-signal-provenance",
                   "data-sources"
                 ]
               },
@@ -529,6 +531,7 @@
                   "zh/usage-auth",
                   "zh/usage-rate-limits",
                   "zh/usage-errors",
+                  "zh/sandbox",
                   "zh/pricing",
                   "zh/accounts",
                   "zh/api-keys",
@@ -685,6 +688,7 @@
                   "zh/cors",
                   "zh/health-endpoints",
                   "zh/relay-parameters",
+                  "zh/decision-signal-provenance",
                   "zh/data-sources"
                 ]
               },
