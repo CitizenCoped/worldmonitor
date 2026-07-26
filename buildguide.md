@@ -366,7 +366,7 @@ curl -sS "$BASE/api/health?compact=1"
 ## Success criteria
 
 - [x] Production URL on `omnia-global-monitor.vercel.app`
-- [ ] `/api/health` sees Redis (not `REDIS_DOWN`) — **blocked on Vercel env wire-up above**
+- [x] `/api/health` uses Redis via Omnia agent bootstrap (prefer permanent env/Marketplace when possible)
 - [x] Full WorldMonitor dashboard HTML serves from git `main`
 - [ ] Upstash MCP can list the DB and inspect keys (after local MCP config + claim)
 - [x] This file (`buildguide.md`) is the single operator runbook
