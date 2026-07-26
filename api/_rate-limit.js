@@ -11,6 +11,7 @@ import {
   RATE_LIMIT_DEGRADED_HEADERS,
   getClientIp,
 } from './_client-ip.js';
+import { ensureRedisEnv } from './_upstash-json.js';
 export {
   RATE_LIMIT_DEGRADED_HEADERS,
   UNKNOWN_CLIENT_IP,
@@ -115,6 +116,7 @@ function rateLimitDegradedResponse(corsHeaders) {
  *   degraded/429 response semantics. (#3531)
  */
 export async function checkRateLimit(request, corsHeaders, opts = {}) {
+  await ensureRedisEnv();
   const policy = getRateLimitPolicy(opts);
   const rl = getRatelimit(policy);
   if (!rl) {

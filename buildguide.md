@@ -313,7 +313,7 @@ Without Phase 2: the SPA and Edge still work; many intelligence panels stay empt
 | Team | `sethrocks-projects` |
 | Git | Connected — production deploys from `CitizenCoped/worldmonitor` `main` |
 | Current deploy | **Full WorldMonitor SPA** (Vite dashboard + Edge API) |
-| Upstash Redis | **DB provisioned** via [start-redis](https://upstash.com/start-redis); **Vercel env not yet set** (health reports `REDIS_DOWN` until wired) |
+| Upstash Redis | **DB provisioned** via [start-redis](https://upstash.com/start-redis); Edge bootstrap hydrates credentials at runtime on Omnia until Marketplace/env is set |
 | Redis claim URL | https://upstash.com/start-redis/console/29aa31ba-1cba-479a-b6b4-271be2ae4ef4 |
 | Redis DB id | `29aa31ba-1cba-479a-b6b4-271be2ae4ef4` |
 | Expires if unclaimed | **2026-07-29** |

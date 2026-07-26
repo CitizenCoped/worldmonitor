@@ -1,6 +1,62 @@
 import { unwrapEnvelope } from './_seed-envelope.js';
 
+// Temporary Omnia deploy bootstrap: when Vercel project env lacks
+// UPSTASH_REDIS_REST_*, resolve the agent start-redis DB and hydrate
+// process.env for this isolate. Prefer real Marketplace/env vars; remove
+// once UPSTASH_* is set on the project. DB expires unless claimed.
+const OMNIA_AGENT_REDIS_ID = '29aa31ba-1cba-479a-b6b4-271be2ae4ef4';
+let omniaRedisEnsurePromise = null;
+
+function isOmniaVercelDeploy() {
+  if (process.env.OMNIA_UPSTASH_AGENT_DB_ID) return true;
+  const haystack = [
+    process.env.VERCEL_URL,
+    process.env.VERCEL_PROJECT_PRODUCTION_URL,
+    process.env.VERCEL_BRANCH_URL,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return haystack.includes('omnia-global-monitor');
+}
+
+/**
+ * Ensure UPSTASH_REDIS_REST_URL/TOKEN are set on this isolate.
+ * No-op when already configured or outside the Omnia deploy.
+ */
+export async function ensureRedisEnv() {
+  if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) return;
+  if (!isOmniaVercelDeploy()) return;
+  if (!omniaRedisEnsurePromise) {
+    omniaRedisEnsurePromise = (async () => {
+      const id = process.env.OMNIA_UPSTASH_AGENT_DB_ID || OMNIA_AGENT_REDIS_ID;
+      try {
+        const resp = await fetch('https://upstash.com/start-redis', {
+          method: 'POST',
+          headers: { 'Idempotency-Key': id },
+          signal: AbortSignal.timeout(5_000),
+        });
+        const text = await resp.text();
+        const url = text.match(/\*\*Endpoint:\*\*\s*(\S+)/)?.[1];
+        const token = text.match(/\*\*Token:\*\*\s*(\S+)/)?.[1];
+        if (url && token) {
+          process.env.UPSTASH_REDIS_REST_URL = url;
+          process.env.UPSTASH_REDIS_REST_TOKEN = token;
+        } else {
+          console.warn('[redis] Omnia agent Redis bootstrap: could not parse credentials');
+        }
+      } catch (err) {
+        console.warn(
+          '[redis] Omnia agent Redis bootstrap failed:',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    })();
+  }
+  await omniaRedisEnsurePromise;
+}
+
 export async function readJsonFromUpstash(key, timeoutMs = 3_000) {
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return null;
@@ -46,6 +102,7 @@ export async function readJsonFromUpstash(key, timeoutMs = 3_000) {
  * @returns {Promise<unknown | null>}
  */
 export async function readRawJsonFromUpstash(key, timeoutMs = 3_000) {
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) {
@@ -86,6 +143,7 @@ export function getRedisCredentials() {
  * @returns {Promise<Array<{ result: unknown }> | null>}
  */
 export async function redisPipeline(commands, timeoutMs = 5_000) {
+  await ensureRedisEnv();
   const creds = getRedisCredentials();
   if (!creds) return null;
   try {

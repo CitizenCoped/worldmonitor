@@ -7,7 +7,7 @@ import { USER_API_KEY_GATEWAY_VALIDATION_ERROR, validateApiKey } from './_api-ke
 // as `.data`), so importing it is behavior-preserving.
 import { unwrapEnvelope } from './_seed-envelope.js';
 // @ts-expect-error — JS module, no declaration file
-import { redisPipeline, getRedisCredentials } from './_upstash-json.js';
+import { redisPipeline, getRedisCredentials, ensureRedisEnv } from './_upstash-json.js';
 import { CII_RISK_SCORE_CACHE_KEYS } from './_cii-risk-cache-keys.js';
 
 export const config = { runtime: 'edge' };
@@ -1331,6 +1331,7 @@ export default async function handler(req, ctx) {
   let refreshLockToken = null;
   let ownsSnapshotRefreshLock = false;
   try {
+    await ensureRedisEnv();
     if (!getRedisCredentials()) throw new Error('Redis not configured');
     // Read the snapshot this request will actually render. `?compact=1` — the
     // browser poll, ~115k/day — reads the ~1 KB compact key instead of dragging the
@@ -1422,6 +1423,7 @@ export default async function handler(req, ctx) {
       ...activationEntries.map(([, marker]) => ['EXISTS', marker]),
       ['GET', CHINA_COVERAGE_SUMMARY_KEY],
     ];
+    await ensureRedisEnv();
     if (!getRedisCredentials()) throw new Error('Redis not configured');
     results = await redisPipeline(commands, 8_000);
     if (!results) throw new Error('Redis request failed');

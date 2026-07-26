@@ -30,6 +30,52 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// Temporary Omnia deploy bootstrap (mirrors api/_upstash-json.js). Hydrates
+// process.env from Upstash agent start-redis when project env is unset.
+const OMNIA_AGENT_REDIS_ID = '29aa31ba-1cba-479a-b6b4-271be2ae4ef4';
+let omniaRedisEnsurePromise: Promise<void> | null = null;
+
+function isOmniaVercelDeploy(): boolean {
+  if (process.env.OMNIA_UPSTASH_AGENT_DB_ID) return true;
+  const haystack = [
+    process.env.VERCEL_URL,
+    process.env.VERCEL_PROJECT_PRODUCTION_URL,
+    process.env.VERCEL_BRANCH_URL,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return haystack.includes('omnia-global-monitor');
+}
+
+async function ensureRedisEnv(): Promise<void> {
+  if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) return;
+  if (!isOmniaVercelDeploy()) return;
+  if (!omniaRedisEnsurePromise) {
+    omniaRedisEnsurePromise = (async () => {
+      const id = process.env.OMNIA_UPSTASH_AGENT_DB_ID || OMNIA_AGENT_REDIS_ID;
+      try {
+        const resp = await fetch('https://upstash.com/start-redis', {
+          method: 'POST',
+          headers: { 'Idempotency-Key': id },
+          signal: AbortSignal.timeout(5_000),
+        });
+        const text = await resp.text();
+        const url = text.match(/\*\*Endpoint:\*\*\s*(\S+)/)?.[1];
+        const token = text.match(/\*\*Token:\*\*\s*(\S+)/)?.[1];
+        if (url && token) {
+          process.env.UPSTASH_REDIS_REST_URL = url;
+          process.env.UPSTASH_REDIS_REST_TOKEN = token;
+        } else {
+          console.warn('[redis] Omnia agent Redis bootstrap: could not parse credentials');
+        }
+      } catch (err) {
+        console.warn('[redis] Omnia agent Redis bootstrap failed:', errMsg(err));
+      }
+    })();
+  }
+  await omniaRedisEnsurePromise;
+}
+
 function hasRemoteRedisConfig(): boolean {
   return Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
 }
@@ -72,6 +118,7 @@ async function readCachedJson(key: string, raw = false): Promise<CacheReadResult
     }
   }
 
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return { status: 'miss' };
@@ -124,6 +171,7 @@ export async function getRawJson(key: string): Promise<unknown | null> {
     const { sidecarCacheGet } = await import('./sidecar-cache');
     return sidecarCacheGet(key);
   }
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) throw new Error('Redis credentials not configured');
@@ -155,6 +203,7 @@ export async function getCachedRawString(key: string): Promise<string | null> {
     const v = sidecarCacheGet(key);
     return typeof v === 'string' ? v : null;
   }
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return null;
@@ -191,6 +240,7 @@ export async function setCachedJson(key: string, value: unknown, ttlSeconds: num
     return true;
   }
 
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return false;
@@ -305,6 +355,7 @@ export async function getCachedJsonBatch(keys: string[], raw = false): Promise<M
     return result;
   }
 
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return result;
@@ -364,6 +415,7 @@ export async function runRedisPipeline(commands: RedisPipelineCommand[], raw = f
   if (process.env.LOCAL_API_MODE === 'tauri-sidecar') return [];
   if (commands.length === 0) return [];
 
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return [];
@@ -391,6 +443,7 @@ export async function runRedisPipeline(commands: RedisPipelineCommand[], raw = f
 
 export async function compareAndDeleteRedisKey(key: string, expectedValue: string, raw = false): Promise<boolean> {
   if (process.env.LOCAL_API_MODE === 'tauri-sidecar') return false;
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token || !expectedValue) return false;
@@ -728,6 +781,7 @@ function emitUpstreamFromHook(usage: UsageHook | undefined, status: number, dura
 }
 
 export async function geoSearchByBox(key: string, lon: number, lat: number, widthKm: number, heightKm: number, count: number, raw = false): Promise<string[]> {
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return [];
@@ -755,6 +809,7 @@ export async function geoSearchByBox(key: string, lon: number, lat: number, widt
 export async function getHashFieldsBatch(key: string, fields: string[], raw = false): Promise<Map<string, string>> {
   const result = new Map<string, string>();
   if (fields.length === 0) return result;
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return result;
@@ -793,6 +848,7 @@ export async function getHashFieldsBatch(key: string, fields: string[], raw = fa
  * @param raw - When true, skips the environment prefix (use for global keys like entitlements)
  */
 export async function deleteRedisKey(key: string, raw = false): Promise<void> {
+  await ensureRedisEnv();
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return;
