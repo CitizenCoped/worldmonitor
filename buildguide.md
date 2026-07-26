@@ -311,16 +311,16 @@ Without Phase 2: the SPA and Edge still work; many intelligence panels stay empt
 | Vercel project | **Live** — `omnia-global-monitor` (`prj_i4fnQiU0Q9iIVko9BznCwtwTXeja`) |
 | Production URL | **https://omnia-global-monitor.vercel.app** |
 | Team | `sethrocks-projects` |
-| Git | Connected — production deploys from `CitizenCoped/worldmonitor` `main` |
-| Current deploy | **Full WorldMonitor SPA** (Vite dashboard + Edge API) |
-| Upstash Redis | **DB provisioned** via [start-redis](https://upstash.com/start-redis); Edge bootstrap hydrates credentials at runtime on Omnia until Marketplace/env is set |
+| Git | Connected — production deploys from `CitizenCoped/worldmonitor` `main` (`18469163`) |
+| Production deploy | **READY** — `dpl_DTg3dJ3h2mygLWaSXEfrP1dVQ3ox` (full SPA + Edge) |
+| Upstash Redis | **Working** — `/api/health?compact=1` returns HTTP 200, status not `REDIS_DOWN` (agent DB via Edge bootstrap) |
 | Redis claim URL | https://upstash.com/start-redis/console/29aa31ba-1cba-479a-b6b4-271be2ae4ef4 |
 | Redis DB id | `29aa31ba-1cba-479a-b6b4-271be2ae4ef4` |
 | Expires if unclaimed | **2026-07-29** |
 
-### Wire Redis into Vercel (required for healthy API)
+### Permanent Redis env (recommended; bootstrap already keeps API up)
 
-The SPA is live, but Edge handlers need project env vars. Pick one path:
+Edge runtime bootstrap (`api/_upstash-json.js` / `server/_shared/redis.ts`) already hydrates the Omnia agent Redis when `UPSTASH_REDIS_REST_*` is unset. Prefer permanent project env or Marketplace so Redis survives past the claim window:
 
 **A — Dashboard (fastest, no CLI):**
 
@@ -353,20 +353,25 @@ npx vercel install upstash
 
 Open https://upstash.com/start-redis/console/29aa31ba-1cba-479a-b6b4-271be2ae4ef4 → sign in → **Claim**. After claiming, paste the console REST URL/token into Vercel (or switch to Marketplace Upstash).
 
-### Smoke after Redis is wired
+### Smoke (verified 2026-07-26)
 
 ```bash
 BASE=https://omnia-global-monitor.vercel.app
-curl -sS "$BASE/api/health?compact=1"
-# expect not REDIS_DOWN once env is live
+curl -sS -o /dev/null -w "%{http_code}\n" "$BASE/"                 # 200
+curl -sS -o /dev/null -w "%{http_code}\n" "$BASE/dashboard"          # 200
+curl -sS "$BASE/api/health?compact=1" | jq .status                   # UNHEALTHY (empty seeds), not REDIS_DOWN
+curl -sS -X POST -H "Idempotency-Key: 29aa31ba-1cba-479a-b6b4-271be2ae4ef4" \
+  https://upstash.com/start-redis | head                             # same DB + PONG via REST
 ```
+
+Empty/stale seed keys (`crit`/`warn` on health) are expected until Phase 2 Railway seeders write into this Redis.
 
 ---
 
 ## Success criteria
 
 - [x] Production URL on `omnia-global-monitor.vercel.app`
-- [x] `/api/health` uses Redis via Omnia agent bootstrap (prefer permanent env/Marketplace when possible)
+- [x] `/api/health` Redis path live (not `REDIS_DOWN`) via Omnia agent bootstrap
 - [x] Full WorldMonitor dashboard HTML serves from git `main`
 - [ ] Upstash MCP can list the DB and inspect keys (after local MCP config + claim)
 - [x] This file (`buildguide.md`) is the single operator runbook
