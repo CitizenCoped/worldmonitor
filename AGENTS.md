@@ -235,6 +235,16 @@ Heavy checks (`test:data`, typechecks, edge-bundle) must run **sequentially** in
 - New data sources MUST have bootstrap hydration wired in `api/bootstrap.js`
 - Redis seed scripts MUST write `seed-meta:<key>` for health monitoring
 
+## Cursor Cloud specific instructions
+
+Durable, non-obvious notes for Cloud Agents (the update script already ran `npm ci`). Standard commands live in **How to Run** above.
+
+- **Node version:** repo pins Node 24 (`.nvmrc`). The base image's `/exec-daemon/node` (Node 22) sits ahead of nvm in `PATH`, so a shim was added to `~/.bashrc` that prepends the nvm Node 24 bin. New shells get Node 24 automatically; verify with `node --version` (expect `v24.x`). If a shell shows Node 22, run `nvm use 24` or open a login shell (`bash -l`).
+- **Running the app (primary product):** `npm run dev` serves the SPA on `http://localhost:3000` with **zero env vars**. In dev, `/api/*` is served in-process by Vite plugins (`server/worldmonitor/*` sebuf handlers) or proxied to upstream providers — you do NOT need `vercel dev` or a separate API process. Optional creds go in `.env.local` (copy `.env.example`); every key is optional and only enables individual features.
+- **`npm run test:data` build-dependent failures:** `tests/dashboard-critical-css.test.mjs` (2 assertions) requires a prior `VITE_VARIANT=full vite build` because it inspects `dist/dashboard.html`. On a fresh tree with no build these 2 fail with "`dist/dashboard.html` must exist"; ~16.5k other tests pass. Run a build first if you need them green.
+- **Browser/manual testing:** reusing a warm Chrome profile can hit `net::ERR_INSUFFICIENT_RESOURCES` on this map/WebGL-heavy app; use a fresh or incognito window for reliable manual/E2E runs.
+- **Proto codegen (`make generate`) is optional** for dev/typecheck/test and needs Go + buf + sebuf `v0.11.1` plugins (`make install-plugins`); skip unless editing `proto/`.
+
 ## External References
 
 - [Architecture (system reference)](ARCHITECTURE.md)
