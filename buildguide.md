@@ -135,11 +135,20 @@ curl -X POST -H "Idempotency-Key: $(uuidgen | tr '[:upper:]' '[:lower:]')" \
 
 Parse Endpoint + Token from the markdown response. Claim at the console URL in the response. Do not commit tokens to git.
 
-**C — Manual console:**
+**C — Manual console + wire script:**
 
-1. Create a Redis DB at [console.upstash.com](https://console.upstash.com).
+1. Create a Redis DB at [console.upstash.com](https://console.upstash.com) (or use agent start-redis above).
 2. Copy REST URL + token.
-3. Set on the Vercel project for Production and Preview:
+3. Either paste into the [Vercel env UI](https://vercel.com/sethrocks-projects/omnia-global-monitor/settings/environment-variables), or:
+
+```bash
+export VERCEL_TOKEN=...   # https://vercel.com/account/tokens
+export UPSTASH_REDIS_REST_URL=...
+export UPSTASH_REDIS_REST_TOKEN=...
+node scripts/omnia-wire-upstash.mjs
+```
+
+Or via CLI:
 
 ```bash
 npx vercel env add UPSTASH_REDIS_REST_URL production
@@ -148,7 +157,7 @@ npx vercel env add UPSTASH_REDIS_REST_URL preview
 npx vercel env add UPSTASH_REDIS_REST_TOKEN preview
 ```
 
-Verify in the Vercel dashboard → Project → Settings → Environment Variables that both keys exist for Production and Preview.
+Verify both keys exist for Production and Preview, then redeploy.
 
 ### 4. Optional Phase 1 API keys
 
@@ -295,47 +304,74 @@ Without Phase 2: the SPA and Edge still work; many intelligence panels stay empt
 
 ---
 
-## Deployment status (2026-07-22)
+## Deployment status (2026-07-26)
 
 | Item | Status |
 |------|--------|
-| Vercel project | **Created** — `omnia-global-monitor` (`prj_i4fnQiU0Q9iIVko9BznCwtwTXeja`) |
+| Vercel project | **Live** — `omnia-global-monitor` (`prj_i4fnQiU0Q9iIVko9BznCwtwTXeja`) |
 | Production URL | **https://omnia-global-monitor.vercel.app** |
 | Team | `sethrocks-projects` |
-| Current deploy | MVP scaffold (home + dashboard placeholders + `/api/health` + `/api/bootstrap`) |
-| Upstash Redis | **Provisioned** via [Upstash agent start-redis](https://upstash.com/start-redis) (temporary until claimed) |
-| Redis claim URL | https://upstash.com/start-redis/console/1c5f55a0-8881-4bdf-8b42-acc9c926cce7 |
-| Redis DB id | `1c5f55a0-8881-4bdf-8b42-acc9c926cce7` |
-| Expires if unclaimed | **2026-07-25** |
+| Git | Connected — production deploys from `CitizenCoped/worldmonitor` `main` |
+| Current deploy | **Full WorldMonitor SPA** (Vite dashboard + Edge API) |
+| Upstash Redis | **DB provisioned** via [start-redis](https://upstash.com/start-redis); **Vercel env not yet set** (health reports `REDIS_DOWN` until wired) |
+| Redis claim URL | https://upstash.com/start-redis/console/29aa31ba-1cba-479a-b6b4-271be2ae4ef4 |
+| Redis DB id | `29aa31ba-1cba-479a-b6b4-271be2ae4ef4` |
+| Expires if unclaimed | **2026-07-29** |
 
-### Claim Redis (required to keep it)
+### Wire Redis into Vercel (required for healthy API)
 
-Open the claim URL above, sign in to Upstash, and click **Claim**. After claiming:
+The SPA is live, but Edge handlers need project env vars. Pick one path:
 
-1. Copy REST URL + token from the Upstash console.
-2. Set them as Vercel project env vars (`UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`) for Production + Preview via Marketplace or dashboard.
-3. Redeploy. Prefer Marketplace (`vercel install upstash`) for a permanent billed/free-tier DB instead of the 3-day agent DB when ready.
+**A — Dashboard (fastest, no CLI):**
 
-### Promote scaffold → full WorldMonitor SPA
+1. Re-fetch credentials (safe to re-run; returns the same DB):
 
-The live site is an MVP scaffold so the project hostname and Redis path could ship without a Vercel CLI login in this agent environment. To serve the real dashboard:
+```bash
+curl -sS -X POST \
+  -H "Idempotency-Key: 29aa31ba-1cba-479a-b6b4-271be2ae4ef4" \
+  https://upstash.com/start-redis
+```
 
-1. In Vercel → Project → Settings → Git, connect `CitizenCoped/worldmonitor` (or your fork).
-2. Ensure `UPSTASH_REDIS_REST_*` are set on the project (Marketplace or claimed agent DB).
-3. Deploy from `main` (build: `npm run build`, root directory `.`, Node 22+).
-4. Confirm `/dashboard` serves the Vite SPA and `/api/bootstrap` hydrates from seed keys (Phase 2 seeds still optional).
+2. Open [Project → Settings → Environment Variables](https://vercel.com/sethrocks-projects/omnia-global-monitor/settings/environment-variables).
+3. Add `UPSTASH_REDIS_REST_URL` = Endpoint and `UPSTASH_REDIS_REST_TOKEN` = Token for **Production** and **Preview**.
+4. Redeploy Production (Deployments → ⋯ → Redeploy).
+
+**B — Script (needs a Vercel token):**
+
+1. Create a token at https://vercel.com/account/tokens
+2. Export `VERCEL_TOKEN`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`
+3. Run: `node scripts/omnia-wire-upstash.mjs`
+
+**C — Marketplace (permanent):**
+
+```bash
+npx vercel link --yes --scope sethrocks-projects --project omnia-global-monitor
+npx vercel install upstash
+```
+
+### Claim Redis (keep past 2026-07-29)
+
+Open https://upstash.com/start-redis/console/29aa31ba-1cba-479a-b6b4-271be2ae4ef4 → sign in → **Claim**. After claiming, paste the console REST URL/token into Vercel (or switch to Marketplace Upstash).
+
+### Smoke after Redis is wired
+
+```bash
+BASE=https://omnia-global-monitor.vercel.app
+curl -sS "$BASE/api/health?compact=1"
+# expect not REDIS_DOWN once env is live
+```
 
 ---
 
 ## Success criteria
 
 - [x] Production URL on `omnia-global-monitor.vercel.app`
-- [x] `/api/health` sees Redis (`redis: "up"`) after agent Redis wiring
-- [x] Dashboard HTML serves; Edge RPCs respond
+- [ ] `/api/health` sees Redis (not `REDIS_DOWN`) — **blocked on Vercel env wire-up above**
+- [x] Full WorldMonitor dashboard HTML serves from git `main`
 - [ ] Upstash MCP can list the DB and inspect keys (after local MCP config + claim)
 - [x] This file (`buildguide.md`) is the single operator runbook
-- [ ] Full WorldMonitor SPA linked from git (follow promote steps above)
-- [ ] Redis claimed / Marketplace permanent DB (before 2026-07-25)
+- [x] Full WorldMonitor SPA linked from git
+- [ ] Redis claimed / Marketplace permanent DB (before 2026-07-29)
 
 ---
 
@@ -346,8 +382,10 @@ The live site is an MVP scaffold so the project hostname and Redis path could sh
 | Vercel project | `omnia-global-monitor` |
 | Project ID | `prj_i4fnQiU0Q9iIVko9BznCwtwTXeja` |
 | Production URL | https://omnia-global-monitor.vercel.app |
+| Dashboard env | https://vercel.com/sethrocks-projects/omnia-global-monitor/settings/environment-variables |
 | Team | `sethrocks-projects` |
 | Redis | Upstash REST (`UPSTASH_REDIS_REST_*`) |
-| Redis claim | https://upstash.com/start-redis/console/1c5f55a0-8881-4bdf-8b42-acc9c926cce7 |
+| Redis claim | https://upstash.com/start-redis/console/29aa31ba-1cba-479a-b6b4-271be2ae4ef4 |
+| Wire script | `scripts/omnia-wire-upstash.mjs` |
 | Config | `vercel.json`, `api/`, `server/_shared/redis.ts` |
 | Seeds | Phase 2 — Railway + `scripts/ais-relay.cjs` / `scripts/run-seeders.sh` |
