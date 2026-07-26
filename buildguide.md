@@ -135,11 +135,20 @@ curl -X POST -H "Idempotency-Key: $(uuidgen | tr '[:upper:]' '[:lower:]')" \
 
 Parse Endpoint + Token from the markdown response. Claim at the console URL in the response. Do not commit tokens to git.
 
-**C — Manual console:**
+**C — Manual console + wire script:**
 
-1. Create a Redis DB at [console.upstash.com](https://console.upstash.com).
+1. Create a Redis DB at [console.upstash.com](https://console.upstash.com) (or use agent start-redis above).
 2. Copy REST URL + token.
-3. Set on the Vercel project for Production and Preview:
+3. Either paste into the [Vercel env UI](https://vercel.com/sethrocks-projects/omnia-global-monitor/settings/environment-variables), or:
+
+```bash
+export VERCEL_TOKEN=...   # https://vercel.com/account/tokens
+export UPSTASH_REDIS_REST_URL=...
+export UPSTASH_REDIS_REST_TOKEN=...
+node scripts/omnia-wire-upstash.mjs
+```
+
+Or via CLI:
 
 ```bash
 npx vercel env add UPSTASH_REDIS_REST_URL production
@@ -148,7 +157,7 @@ npx vercel env add UPSTASH_REDIS_REST_URL preview
 npx vercel env add UPSTASH_REDIS_REST_TOKEN preview
 ```
 
-Verify in the Vercel dashboard → Project → Settings → Environment Variables that both keys exist for Production and Preview.
+Verify both keys exist for Production and Preview, then redeploy.
 
 ### 4. Optional Phase 1 API keys
 
